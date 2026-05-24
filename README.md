@@ -44,7 +44,7 @@ An AI-powered document chatbot built using Streamlit, Groq LLM, and FAISS for Re
 ---
 
 ## 📸 Screenshots
-(https://github.com/sripooja1194-ship-it/zoop-ai-rag2/blob/main/Screenshot%202026-05-24%20221044.png)
+(Screenshot%202026-05-24%20221044.png)
 
 ---
 
