@@ -39,7 +39,7 @@ An AI-powered document chatbot built using Streamlit, Groq LLM, and FAISS for Re
 ---
 
 ## 🌐 Live Demo
-[[Add your Streamlit link here](https://zoop-ai-rag2-9g3kdklwcecqgf8a3aaqzf.streamlit.app/)]
+[(https://zoop-ai-rag2-9g3kdklwcecqgf8a3aaqzf.streamlit.app/)]
 
 ---
 
