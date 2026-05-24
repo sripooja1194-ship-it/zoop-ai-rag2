@@ -1,0 +1,11 @@
+streamlit
+pypdf
+langchain
+langchain-community
+langchain-text-splitters
+faiss-cpu
+huggingface-hub
+sentence-transformers
+groq
+openai-whisper
+streamlit-mic-recorder
