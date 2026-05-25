@@ -13,22 +13,28 @@ from streamlit_mic_recorder import mic_recorder
 st.set_page_config(page_title="Zoop AI RAG", layout="wide")
 
 # ---------------- GROQ CLIENT ---------------- #
-client = Groq(api_key="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")  # 
-
+# Safely pulling from st.secrets as defined later in your code
+if "GROQ_API_KEY" in st.secrets:
+    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+else:
+    # Fallback to hardcoded if secrets aren't set up yet
+    client = Groq(api_key="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") 
 
 # ---------------- SESSION STATE ---------------- #
-
 if "chat_history" not in st.session_state:
-
     st.session_state.chat_history = []
 
 if "vectorstore" not in st.session_state:
-
     st.session_state.vectorstore = None
 
-if "processed_files" not in st.session_state:
+if "full_pdf_text" not in st.session_state:  # <-- CRITICAL FIX: To hold raw text for global summaries
+    st.session_state.full_pdf_text = ""
 
+if "processed_files" not in st.session_state:
     st.session_state.processed_files = set()
+
+if "last_query" not in st.session_state:
+    st.session_state.last_query = ""
 
 # ---------------- WELCOME SCREEN ---------------- #
 
@@ -54,70 +60,73 @@ if len(st.session_state.chat_history) == 0:
     Upload documents from the sidebar 👈
     """)
 
-# ---------------- EMBEDDINGS (CACHED) ---------------- #
+# ---------------- EMBEDDINGS & MODELS (CACHED) ---------------- #
 @st.cache_resource
 def get_embeddings():
-
-    return HuggingFaceEmbeddings(
-        model_name="all-MiniLM-L6-v2"
-    )
+    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 embeddings = get_embeddings()
 
-# ---------------- WHISPER MODEL ---------------- #
 @st.cache_resource
 def load_whisper():
-
     return whisper.load_model("base")
 
 whisper_model = load_whisper()
 
 # ---------------- PDF PROCESSING ---------------- #
 def process_pdfs(uploaded_files):
- @st.cache_resource
- def get_embeddings():
-    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-
-embeddings = get_embeddings()
-
-# ---------------- PDF PROCESSING ---------------- #
-def process_pdfs(uploaded_files):
-
     text = ""
-
     for file in uploaded_files:
-
         if file.name in st.session_state.processed_files:
             continue
-
+        
         pdf_reader = PdfReader(file)
-
         for page in pdf_reader.pages:
-
             page_text = page.extract_text()
-
             if page_text:
-                text += page_text
-
+                text += page_text + "\n"
+        
         st.session_state.processed_files.add(file.name)
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=100
-    )
+    if not text.strip():
+        return None
 
+    # Keep track of global text for summarization tasks
+    st.session_state.full_pdf_text += "\n" + text
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
     chunks = splitter.split_text(text)
 
     if not chunks:
         return None
 
-    vectorstore = FAISS.from_texts(
-        chunks,
-        embeddings
-    )
-
+    vectorstore = FAISS.from_texts(chunks, embeddings)
     return vectorstore
 
+# ---------------- LLM FUNCTION ---------------- #
+def ask_llm(prompt):
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature if 'temperature' in locals() else 0.2,
+        max_tokens=max_tokens if 'max_tokens' in locals() else 300
+    )
+    return response.choices[0].message.content
+
+# ---------------- RAG CONTEXT PIPELINE ---------------- #
+def get_context(question):
+    # CRITICAL FIX: If the user explicitly asks for a summary/entire overview, bypass similarity search
+    summary_keywords = ["summarize", "summary", "give me an overview", "explain the whole", "key points"]
+    if any(keyword in question.lower() for keyword in summary_keywords):
+        if st.session_state.full_pdf_text:
+            # Return a trimmed version if it's exceptionally long to respect model context window
+            return st.session_state.full_pdf_text[:15000] 
+        
+    if not st.session_state.vectorstore:
+        return ""
+
+    docs = st.session_state.vectorstore.similarity_search(question, k=4)
+    return "\n".join([d.page_content for d in docs])
 
 # ---------------- SIDEBAR ---------------- #
 with st.sidebar:
@@ -147,86 +156,49 @@ with st.sidebar:
          st.chat_message(...)
 
 
-    st.session_state.chat_history.append({
-    "role": "assistant",
-    "content": answer if 'answer' in locals() else "No response generated"
-})
-    st.markdown("---")
-
     # Upload PDFs
     st.subheader("📄 Upload PDFs")
-
-    uploaded_files = st.file_uploader(
-        "Upload your PDF files",
-        type=["pdf"],
-        accept_multiple_files=True
-    )
+    uploaded_files = st.file_uploader("Upload your PDF files", type=["pdf"], accept_multiple_files=True)
+    
+    if uploaded_files:
+        with st.spinner("Processing PDFs..."):
+            vs = process_pdfs(uploaded_files)
+            if vs is not None:
+                st.session_state.vectorstore = vs
+                st.success("PDF processed successfully")
+            elif st.session_state.vectorstore is None:
+                st.error("PDF could not be processed")
 
     st.markdown("---")
 
     # Upload Image
     st.subheader("🖼 Upload Image")
-
-    uploaded_image = st.file_uploader(
-        "Upload Image",
-        type=["png", "jpg", "jpeg"]
-    )
-
+    uploaded_image = st.file_uploader("Upload Image", type=["png", "jpg", "jpeg"])
     if uploaded_image is not None:
-
         image = Image.open(uploaded_image)
-
-        st.image(
-            image,
-            caption="Uploaded Image",
-            use_container_width=True
-        )
+        st.image(image, caption="Uploaded Image", use_container_width=True)
 
     st.markdown("---")
 
-    # AI Model
+    # AI Model Selection & Hyperparameters
     st.subheader("🧠 AI Model")
-
-    selected_model = st.selectbox(
-        "Choose Model",
-        [
-            "phi3:mini",
-            "llama3",
-            "mistral"
-        ]
-    )
+    selected_model = st.selectbox("Choose Model", ["llama-3.1-8b-instant", "mistral", "phi3:mini"])
+    temperature = st.slider("Temperature", 0.0, 1.0, 0.2)
+    max_tokens = st.slider("Max Tokens", 100, 2000, 500)
 
     st.markdown("---")
 
-    # Settings
-    st.subheader("⚙️ Settings")
-
-    temperature = st.slider(
-        "Temperature",
-        0.0,
-        1.0,
-        0.2
-    )
-
-    max_tokens = st.slider(
-        "Max Tokens",
-        100,
-        1000,
-        300
-    )
-
-    st.markdown("---")
-
-    # Quick Actions
+    # Quick Actions (Intercepted and wired into the chat framework)
     st.subheader("⚡ Quick Actions")
+    click_query = ""
+    if st.button("🧠 Key Points"):
+        click_query = "Provide the key bullet points from the document."
+    if st.button("📘 Explain Simply"):
+        click_query = "Explain the concepts in this document simply as if I am 10 years old."
+    if st.button("❓ Generate Questions"):
+        click_query = "Generate 5 practice questions based on this document context."
 
-    key_points = st.button("🧠 Key Points")
-
-    explain_simple = st.button("📘 Explain Simply")
-
-    generate_questions = st.button("❓ Generate Questions")
-
-    st.markdown("---")
+        st.markdown("---")
 
     # Download Chat
     chat_text = ""
@@ -243,129 +215,65 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Stats
-    st.subheader("📊 Stats")
-
-    st.metric(
-        "Chats",
-        len(st.session_state.chat_history)
-    )
-
-    if uploaded_files:
-
-        st.metric(
-            "Documents",
-            len(uploaded_files)
-        )
-
-    st.markdown("---")
-
     # Clear Chat
     if st.button("🧹 Clear Chat"):
-
         st.session_state.chat_history = []
-
+        st.session_state.processed_files = set()
+        st.session_state.full_pdf_text = ""
+        st.session_state.vectorstore = None
         st.rerun()
 
+
 # ---------------- CHAT DISPLAY ---------------- #
-
 for msg in st.session_state.chat_history:
-
     avatar = "🤖" if msg["role"] == "assistant" else "👨"
-
     with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(msg["content"])
 
-# ---------------- QUERY INPUT ---------------- #
-# ---------------- VOICE INPUT ---------------- #
-
-audio = mic_recorder(
-    start_prompt="🎤 Start Recording",
-    stop_prompt="⏹ Stop Recording",
-    just_once=True,
-    use_container_width=True
-)
-voice_text = ""
-
-if audio:
-
-    with open("temp_audio.wav", "wb") as f:
-        f.write(audio["bytes"])
-
-    result = whisper_model.transcribe("temp_audio.wav")
-
-    voice_text = result["text"]
-
-    st.success(f"🎤 You said: {voice_text}")
-
-
-# ---------------- RAG PIPELINE ---------------- #
-def get_context(question):
-
-    if not st.session_state.vectorstore:
-        return ""
-
-    docs = st.session_state.vectorstore.similarity_search(question, k=3)
-
-    return "\n".join([d.page_content for d in docs])
-
-def analyze_image_with_groq(image_bytes):
-    response = client.chat.completions.create(
-        model="llama-3.2-11b-vision-preview",
-        messages=[
-            {
-                "role": "user",
-                "content": "Describe this image in detail.",
-                "image": image_bytes
-            }
-        ]
-    )
-
-    return response.choices[0].message.content
-
-
-from groq import Groq
-import streamlit as st
-
-client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-
-def ask_llm(prompt):
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
-    )
-    return response.choices[0].message.content
-
-# ---------------- MAIN CHAT FLOW (FIXED) ---------------- #
-
+# ---------------- INPUT CAPTURE ---------------- #
 text_query = st.chat_input("Ask something from your PDF...")
 
-# initialize memory
-if "last_query" not in st.session_state:
-    st.session_state.last_query = ""
+# Voice Input Handling
+audio = mic_recorder(start_prompt="🎤 Voice Input", stop_prompt="⏹ Stop Recording", just_once=True, use_container_width=True)
+if audio:
+    with open("temp_audio.wav", "wb") as f:
+        f.write(audio["bytes"])
+    result = whisper_model.transcribe("temp_audio.wav")
+    text_query = result["text"]
 
+# Overwrite query if a Quick Action button was clicked
+if click_query:
+    text_query = click_query
+
+# ---------------- MAIN CHAT FLOW Execution ---------------- #
 if text_query and text_query != st.session_state.last_query:
-
     st.session_state.last_query = text_query
 
-    # user message
-    st.session_state.chat_history.append({
-        "role": "user",
-        "content": text_query
-    })
-
-    with st.chat_message("user"):
+    # Append and show User Message
+    st.session_state.chat_history.append({"role": "user", "content": text_query})
+    with st.chat_message("user", avatar="👨"):
         st.markdown(text_query)
 
-    # context
+    # Context retrieval with upgraded smart checks
     context = get_context(text_query)
 
-    prompt = f"""
+    if not context.strip():
+        prompt = f"The user is asking: '{text_query}'. Politely inform them to upload a PDF context first to get started."
+    else:
+        prompt = f"""
 You are Zoop AI assistant.
 
-Answer ONLY using the provided context.
+You can understand:
+- Hindi
+- English
+- Hinglish
+
+If user asks in Hindi, answer in Hindi.
+If user asks in English, answer in English.
+If user asks in Hinglish, answer naturally in Hinglish.
+
+Answer using the provided context.
+If it is a summary request, construct a comprehensive synthesis across all details given.
 
 Context:
 {context}
@@ -374,17 +282,15 @@ Question:
 {text_query}
 """
 
-    # run LLM safely
-    try:
-        answer = ask_llm(prompt)
-    except Exception as e:
-        answer = f"Error: {str(e)}"
+    # Run LLM
+    with st.chat_message("assistant", avatar="🤖"):
+        with st.spinner("Thinking..."):
+            try:
+                answer = ask_llm(prompt)
+                st.markdown(answer)
+            except Exception as e:
+                answer = f"Error: {str(e)}"
+                st.error(answer)
 
-    # assistant message
-    with st.chat_message("assistant"):
-        st.markdown(answer)
-
-    st.session_state.chat_history.append({
-        "role": "assistant",
-        "content": answer
-    })
+    # Save Assistant Response
+    st.session_state.chat_history.append({"role": "assistant", "content": answer})
