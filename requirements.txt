@@ -9,4 +9,3 @@ sentence-transformers
 groq
 openai-whisper
 streamlit-mic-recorder
-imageio-ffmpeg
